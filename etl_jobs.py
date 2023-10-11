@@ -1,24 +1,16 @@
 import sys
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import explode
 from pyspark.sql.functions import sum, window, count, approx_count_distinct, to_timestamp, col, avg
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType, TimestampType, DateType
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DateType
 
-def extract(spark):
+def extract(spark, data_path):
+
     netflix_ratings_schema = StructType([
         StructField('date', DateType(), True),
         StructField('film_id', IntegerType(), True),
         StructField('user_id', StringType(), True),
         StructField('rate', IntegerType(), True)])
-    
-    netflix_ratings_df = spark \
-        .readStream \
-        .option('maxFilesPerTrigger', 2) \
-        .option('header', True) \
-        .schema(netflix_ratings_schema) \
-        .csv('./data/netflix-prize-data')
-
 
     movie_titles_schema = StructType([
         StructField('id', IntegerType(), True),
@@ -26,15 +18,22 @@ def extract(spark):
         StructField('title', StringType(), True)
     ])
 
+    netflix_ratings_df = spark \
+        .readStream \
+        .option('maxFilesPerTrigger', 2) \
+        .option('header', True) \
+        .schema(netflix_ratings_schema) \
+        .csv(f'{data_path}/netflix-prize-data')
+    
     movie_titles_df = spark.read.format('csv') \
         .option('header', True) \
         .schema(movie_titles_schema) \
-        .load('./data/movie_titles.csv')
+        .load(f'{data_path}/movie_titles.csv')
     
     return netflix_ratings_df, movie_titles_df
     
 
-def transform(netflix_ratings_df, movie_titles_df, anomaly_detection, time_length, ratings_number, avg_rating):
+def transform(netflix_ratings_df, movie_titles_df, anomaly_detection, time_length=0, ratings_number=0, avg_rating=0):
     ratings_with_titles_df = netflix_ratings_df.join(movie_titles_df, 
                                                 netflix_ratings_df.film_id == movie_titles_df.id, 'inner')
     
@@ -67,19 +66,33 @@ def transform(netflix_ratings_df, movie_titles_df, anomaly_detection, time_lengt
     
     return result_df
 
-def load(result_df, delay):
+
+def load(result_df, delay, cluster_name):
+
+    def postgres_sink(batch_df, batch_id):
+        # db passes can be parametrized
+        batch_df.write \
+            .format("jdbc") \
+            .mode("overwrite") \
+            .option("url", f"jdbc:postgresql://{cluster_name}-m:8432/streamoutput") \
+            .option("dbtable", "netflix_movie_ratings") \
+            .option("user", "postgres") \
+            .option("password", "secret") \
+            .option("truncate", "true") \
+            .save()
+
     if delay == 'A':
         result_df \
             .writeStream \
             .outputMode("complete") \
-            .format("console") \
+            .foreachBatch(postgres_sink) \
             .start() \
             .awaitTermination()
     elif delay == 'C':
         result_df \
             .writeStream \
             .outputMode("append") \
-            .format("console") \
+            .foreachBatch(postgres_sink) \
             .start() \
             .awaitTermination()
 
@@ -90,24 +103,28 @@ def main():
         .builder \
         .appName("StructuredNetflixRatesApp") \
         .getOrCreate()
+    
+    
+    cluster_name, data_path, delay = sys.argv[1], sys.argv[2], sys.argv[3]
 
     # delay parameter - A (minimum latency, non-terminal results) or C (terminal results)
-    delay = sys.argv[1]
 
     anomaly_detection = False
+    time_length, ratings_number, avg_rating = [0] * 3
     # Anomaly detection mode
-    if len(sys.argv) == 5:
-        time_length, ratings_number, avg_rating = sys.argv[2], int(sys.argv[3]), float(sys.argv[4])
+    if len(sys.argv) == 6:
+        time_length, ratings_number, avg_rating = sys.argv[3], int(sys.argv[4]), float(sys.argv[5])
         anomaly_detection = True
 
     # data processing
-    netflix_ratings_df, movie_titles_df = extract(spark)
+    netflix_ratings_df, movie_titles_df = extract(spark, data_path)
     result_df = transform(netflix_ratings_df, movie_titles_df, anomaly_detection,
                            time_length, ratings_number, avg_rating)
-    load(result_df, delay)
+    load(result_df, delay, cluster_name)
 
 
-
+if __name__ == '__main__':
+    main()
 
 
 
