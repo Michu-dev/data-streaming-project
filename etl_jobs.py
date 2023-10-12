@@ -1,10 +1,10 @@
 import sys
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import sum, window, count, approx_count_distinct, to_timestamp, col, avg
+from pyspark.sql.functions import sum, window, count, approx_count_distinct, to_timestamp, col, avg, from_json
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DateType
 
-def extract(spark, data_path):
+def extract(spark, cluster_name):
 
     netflix_ratings_schema = StructType([
         StructField('date', DateType(), True),
@@ -18,17 +18,22 @@ def extract(spark, data_path):
         StructField('title', StringType(), True)
     ])
 
-    netflix_ratings_df = spark \
+    df = spark \
         .readStream \
-        .option('maxFilesPerTrigger', 2) \
-        .option('header', True) \
-        .schema(netflix_ratings_schema) \
-        .csv(f'{data_path}/netflix-prize-data')
+        .format("kafka") \
+        .option("kafka.bootstrap.servers", f"${cluster_name}-w-0:9092") \
+        .option("subscribe", "kafka-input") \
+        .load()
+    
+    json_df = df.selectExpr("CAST(value AS STRING) as value") 
+
+    netflix_ratings_df = json_df.withColumn("value", from_json(json_df["value"], netflix_ratings_schema)) \
+        .select("value.*")
     
     movie_titles_df = spark.read.format('csv') \
         .option('header', True) \
         .schema(movie_titles_schema) \
-        .load(f'{data_path}/movie_titles.csv')
+        .load('./data/movie_titles.csv')
     
     return netflix_ratings_df, movie_titles_df
     
@@ -67,7 +72,9 @@ def transform(netflix_ratings_df, movie_titles_df, anomaly_detection, time_lengt
     return result_df
 
 
-def load(result_df, delay, cluster_name):
+def load(result_df, delay, cluster_name, anomaly_detection):
+
+    dbtable = 'anomalies' if anomaly_detection else 'netflix_movie_ratings_agg'
 
     def postgres_sink(batch_df, batch_id):
         # db passes can be parametrized
@@ -75,7 +82,7 @@ def load(result_df, delay, cluster_name):
             .format("jdbc") \
             .mode("overwrite") \
             .option("url", f"jdbc:postgresql://{cluster_name}-m:8432/streamoutput") \
-            .option("dbtable", "netflix_movie_ratings") \
+            .option("dbtable", dbtable) \
             .option("user", "postgres") \
             .option("password", "secret") \
             .option("truncate", "true") \
@@ -105,7 +112,7 @@ def main():
         .getOrCreate()
     
     
-    cluster_name, data_path, delay = sys.argv[1], sys.argv[2], sys.argv[3]
+    cluster_name, delay = sys.argv[1], sys.argv[2]
 
     # delay parameter - A (minimum latency, non-terminal results) or C (terminal results)
 
@@ -117,10 +124,10 @@ def main():
         anomaly_detection = True
 
     # data processing
-    netflix_ratings_df, movie_titles_df = extract(spark, data_path)
+    netflix_ratings_df, movie_titles_df = extract(spark, cluster_name)
     result_df = transform(netflix_ratings_df, movie_titles_df, anomaly_detection,
                            time_length, ratings_number, avg_rating)
-    load(result_df, delay, cluster_name)
+    load(result_df, delay, cluster_name, anomaly_detection)
 
 
 if __name__ == '__main__':
