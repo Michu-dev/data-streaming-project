@@ -11,3 +11,5 @@ Project made for Data Streaming Processing in Big Data, written in Spark Structu
 **KafkaProducer** - folder with Producer in Apache Kafka to ingest data streams
 
 **tests** - folder for unit testing in pytest
+
+**data** - data for tests purpuses
